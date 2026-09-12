@@ -1,0 +1,14 @@
+# 私密配置（真实 UUID / 域名），绝不入库
+.env
+
+# 运行产物与数据
+data/
+temp/
+
+# 第三方二进制，从 https://github.com/XIU2/CloudflareSpeedTest/releases 下载后放根目录
+cfst.exe
+
+# 杂项
+*.log
+Thumbs.db
+Desktop.ini
