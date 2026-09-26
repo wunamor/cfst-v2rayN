@@ -6,8 +6,8 @@
 ## 核心模块
 目录结构：根目录仅保留 `Main.ps1`、`cfst.exe`、`Start-Server.vbs`、`AGENTS.md`；子脚本统一放 `scripts\`；数据统一放 `data\`。子脚本内部一律用 `$ProjectRoot = Split-Path $PSScriptRoot -Parent` 定位根目录（勿直接用 `$PSScriptRoot` 拼 data/cfst.exe 路径）。
 - **Main.ps1**: 主控脚本（根目录），串行调度 `scripts\` 下三个子模块。`$Count = 30` 在文件顶部统一配置"ping 生成结果并导入 v2rayN 的 IP 个数"。子脚本失败时按 `$LASTEXITCODE` 中止。
-- **scripts\Fetch-IP.ps1**: CIDR 源地址读环境变量 `CFST_CIDR_URL`（未配置则 `[FAIL] exit 1`），带时间戳击穿 CDN 缓存拉取 CM 的 `CF-CIDR.txt`，用正则 `^(162\.159\.|162\.158\.|108\.162\.|172\.66\.)` 清洗毒瘤网段，保留前 N 条写入 `data\ip.txt`。
-- **scripts\Ping-IP.ps1**: 调用根目录的 `cfst.exe -tp 443 -dd -tl 300 -dn $TargetCount` 测速；读取 result.csv 后按延迟升序排序，**只保留前 TargetCount 个**写入 `data\surviving_ips.txt`。
+- **scripts\Fetch-IP.ps1**: CIDR 源地址读环境变量 `CFST_CIDR_URL`（未配置则 `[FAIL] exit 1`），带时间戳击穿 CDN 缓存拉取 CM 的 `CF-CIDR.txt`，用正则 `^(162\.159\.|162\.158\.|108\.162\.|172\.66\.)` 清洗毒瘤网段，保留前 N 条写入 `data\ip.txt`。清洗可用 `-SkipClean` 开关或 `CFST_SKIP_CLEAN=1` 跳过（跳过时打 `[WARN]` 并列放行条数；注意：即使 CM 维护的优选列表也含 162.159/108.162/172.66 死段，且 cfst 的 TCP Ping 无法识别其"端口开放但跑不了业务"，跳过清洗默认不推荐）。
+- **scripts\Ping-IP.ps1**: 调用根目录的 `cfst.exe -tp 443 -dd -tl 300 -dn $TargetCount` 测速；开头有 TUN 代理守卫（见历史 Bug #4）；读取 result.csv 后按延迟升序排序，**只保留前 TargetCount 个**写入 `data\surviving_ips.txt`。
 - **scripts\Gen-Sub.ps1**: 读取存活 IP（`-TopN` 上限 30），VMess UUID 与伪装域名读环境变量 `CFST_VMESS_UUID` / `CFST_VMESS_HOST`，拼接 vmess JSON，内层 Base64，外层明文（每行一个 `vmess://...`）无 BOM 写入 `data\v2rayN_sub.txt`。
 - **本地 HTTP 守护**: `Start-Server.vbs` 静默运行 `cmd /c cd /d <根目录>\data && python -m http.server $CFST_HTTP_PORT`（端口默认 22222，HTTP 根即 data），v2rayN 订阅 `http://127.0.0.1:22222/v2rayN_sub.txt`。VBS 用自身所在目录推导根目录，禁止写死绝对路径。
 
@@ -26,6 +26,9 @@
 3. **控制台中文乱码**
    - 根因：`.ps1` 源文件被保存为"无 BOM 的 UTF-8"，Windows PowerShell 5.1 会按 ANSI(GBK) 解码源码导致乱码。
    - 修法：**所有 `.ps1` 源文件必须保存为"带 BOM 的 UTF-8"**（与 data 数据文件相反！脚本源码要 BOM，输出数据不要 BOM）；脚本内的输出信息避免使用 emoji（GBK 码页下必花屏），统一改用 `[OK]` / `[FAIL]` / `[RUN]` / `[DONE]` / `[ABORT]` 标记。
+4. **代理（TUN 模式）污染优选测速**
+   - 分析：`cfst.exe` 用 Go 裸 TCP 直连 `IP:443`，**不读取**系统代理 / PAC / `HTTP_PROXY` 环境变量，因此 v2rayN 的规则模式、全局模式（系统代理）都不影响测速。唯一例外是 **TUN/透明代理虚拟网卡**（v2rayN TUN、Clash TUN 等），它在路由层劫持全部流量，使测得的"延迟"实为到代理服务器的延迟，无人值守时会静默产出失真订阅。
+   - 修法：`Ping-IP.ps1` 开头有"代理守卫"——检查默认路由 `0.0.0.0/0` 所在网卡是否为 TUN 类（`InterfaceDescription`/`Name` 匹配 `wintun|utun|tap|tun`），命中即 `[ABORT] exit 1`；确知无碍可加 `-AllowTransparentProxy` 强制继续。系统代理仅打 `[INFO]` 提示不拦截。日常挂机建议 v2rayN 用 PAC/规则模式而非 TUN 模式。Fetch 步骤走系统代理下载 CIDR 文本属正常，不影响测速。
 
 ## 工程约定
 - **禁止硬编码私密数据**：VMess UUID、伪装域名、CIDR 源地址、HTTP 端口一律读环境变量（`CFST_VMESS_UUID` / `CFST_VMESS_HOST` / `CFST_CIDR_URL` / `CFST_HTTP_PORT`）。本地私密值放根目录 `.env`（已被 `.gitignore` 排除），`.env.example` 为入库模板；Main.ps1 启动时自动把 `.env` 注入进程环境变量，子脚本读 `$env:` 默认值。缺关键变量时 `[FAIL] exit 1`，禁止静默回退到假值。
