@@ -6,4 +6,4 @@ root = fso.GetParentFolderName(WScript.ScriptFullName)
 dataDir = fso.BuildPath(root, "data")
 port = shell.Environment("PROCESS")("CFST_HTTP_PORT")
 If port = "" Then port = "22222"
-shell.Run "cmd /c cd /d """ & dataDir & """ && python -m http.server " & port, 0, False
+shell.Run "cmd /c cd /d """ & dataDir & """ && python -m http.server " & port & " --bind 127.0.0.1", 0, False
