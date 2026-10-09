@@ -41,6 +41,12 @@ try {
   }
   $finalLines = $cleanLines | Select-Object -First $RetainN
 
+  # 防呆：清洗后为空则不覆盖旧缓存（源站换格式/网络返回空页时保护降级数据）
+  if (@($finalLines).Count -eq 0) {
+    Write-Host "[FAIL] 清洗后无任何 CIDR 条目，保留旧 ip.txt 不覆盖"
+    exit 1
+  }
+
   # 关键：使用不带 BOM 的 UTF8 编码 + LF 换行写入，否则 cfst.exe (Go) 的 net.ParseCIDR 会因 EF BB BF 报
   # "ParseCIDR err invalid CIDR address"
   $utf8NoBom = New-Object System.Text.UTF8Encoding $false

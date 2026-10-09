@@ -14,6 +14,7 @@ $ipFilePath = Join-Path -Path $ProjectRoot -ChildPath $IpFile
 $csvPath = Join-Path -Path $ProjectRoot -ChildPath $OutCsv
 $rawIpPath = Join-Path -Path $ProjectRoot -ChildPath $OutRawIp
 
+if (!(Test-Path $exePath)) { Write-Host "[FAIL] 找不到 cfst.exe: $exePath"; exit 1 }
 if (!(Test-Path $ipFilePath)) { Write-Host "[FAIL] 找不到 IP 源文件: $ipFilePath"; exit 1 }
 
 # ---------------- 代理守卫 ----------------
@@ -47,8 +48,9 @@ if ($ie.ProxyEnable -eq 1) {
 }
 # ------------------------------------------
 
+# 注意：故意不预删 surviving_ips.txt——测速失败时 Main.ps1 需要降级沿用旧存活列表；
+# 成功路径由 WriteAllLines 整体覆盖，不存在脏数据残留
 if (Test-Path $csvPath) { Remove-Item $csvPath -Force }
-if (Test-Path $rawIpPath) { Remove-Item $rawIpPath -Force }
 
 # 通过管道向 stdin 喂入空行，自动满足 cfst.exe 结尾的“按下回车键退出”，无需人工干预
 # & 调用为同步串行：本行结束后才会继续往下执行

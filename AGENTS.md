@@ -5,9 +5,9 @@
 
 ## 核心模块
 目录结构：根目录仅保留 `Main.ps1`、`cfst.exe`、`Start-Server.vbs`、`AGENTS.md`；子脚本统一放 `scripts\`；数据统一放 `data\`。子脚本内部一律用 `$ProjectRoot = Split-Path $PSScriptRoot -Parent` 定位根目录（勿直接用 `$PSScriptRoot` 拼 data/cfst.exe 路径）。
-- **Main.ps1**: 主控脚本（根目录），串行调度 `scripts\` 下三个子模块。`$Count = 30` 在文件顶部统一配置"ping 生成结果并导入 v2rayN 的 IP 个数"。子脚本失败时按 `$LASTEXITCODE` 中止。
-- **scripts\Fetch-IP.ps1**: CIDR 源地址读环境变量 `CFST_CIDR_URL`（未配置则 `[FAIL] exit 1`），带时间戳击穿 CDN 缓存拉取 CM 的 `CF-CIDR.txt`，用正则 `^(162\.159\.|162\.158\.|108\.162\.|172\.66\.)` 清洗毒瘤网段，保留前 N 条写入 `data\ip.txt`。清洗可用 `-SkipClean` 开关或 `CFST_SKIP_CLEAN=1` 跳过（跳过时打 `[WARN]` 并列放行条数；注意：即使 CM 维护的优选列表也含 162.159/108.162/172.66 死段，且 cfst 的 TCP Ping 无法识别其"端口开放但跑不了业务"，跳过清洗默认不推荐）。
-- **scripts\Ping-IP.ps1**: 调用根目录的 `cfst.exe -tp 443 -dd -tl 300 -dn $TargetCount` 测速；开头有 TUN 代理守卫（见历史 Bug #4）；读取 result.csv 后按延迟升序排序，**只保留前 TargetCount 个**写入 `data\surviving_ips.txt`。
+- **Main.ps1**: 主控脚本（根目录），串行调度 `scripts\` 下三个子模块。`$Count = 30` 在文件顶部统一配置"ping 生成结果并导入 v2rayN 的 IP 个数"。降级容错：Fetch/Ping 失败时若缓存（ip.txt / surviving_ips.txt）非空则 `[WARN]` 标注缓存时间后继续，仅"失败且无缓存"或 Gen-Sub 失败才中止；`.env` 载入遵循"已有环境变量 > .env"优先级。
+- **scripts\Fetch-IP.ps1**: CIDR 源地址读环境变量 `CFST_CIDR_URL`（未配置则 `[FAIL] exit 1`），带时间戳击穿 CDN 缓存拉取 CM 的 `CF-CIDR.txt`，用正则 `^(162\.159\.|162\.158\.|108\.162\.|172\.66\.)` 清洗毒瘤网段，保留前 N 条写入 `data\ip.txt`。清洗可用 `-SkipClean` 开关或 `CFST_SKIP_CLEAN=1` 跳过（跳过时打 `[WARN]` 并列放行条数；注意：即使 CM 维护的优选列表也含 162.159/108.162/172.66 死段，且 cfst 的 TCP Ping 无法识别其"端口开放但跑不了业务"，跳过清洗默认不推荐）。**清洗结果为空时不覆盖旧 ip.txt**（保护降级缓存）。
+- **scripts\Ping-IP.ps1**: 调用根目录的 `cfst.exe -tp 443 -dd -tl 300 -dn $TargetCount` 测速；开头有 TUN 代理守卫（见历史 Bug #4）；读取 result.csv 后按延迟升序排序，**只保留前 TargetCount 个**写入 `data\surviving_ips.txt`。**禁止预删 surviving_ips.txt**（降级依赖它，成功时由 WriteAllLines 整体覆盖）。
 - **scripts\Gen-Sub.ps1**: 读取存活 IP（`-TopN` 上限 30），VMess UUID、伪装域名与 WS 路径读环境变量 `CFST_VMESS_UUID` / `CFST_VMESS_HOST` / `CFST_VMESS_PATH`（默认 `/`），拼接 vmess JSON，内层 Base64，外层明文（每行一个 `vmess://...`）无 BOM 写入 `data\v2rayN_sub.txt`。另支持 `CFST_RAW_LINKS`（`;` 分隔的原始 `vless://`/`vmess://` 等链接）：按 `;` 拆分（逗号留给 alpn 参数），仅校验 `scheme://` 前缀后原样透传合入订阅尾部；控制台输出必须脱敏（只打印 protocol/host/别名，绝不回显 UUID/pbk，注意 PowerShell 里 `$scheme://` 会被误解析成 `${scheme}:` 作用域，要用 `${scheme}`）。
 - **本地 HTTP 守护**: `Start-Server.vbs` 静默运行 `cmd /c cd /d <根目录>\data && python -m http.server $CFST_HTTP_PORT --bind 127.0.0.1`（端口默认 22222，**只绑回环**避免订阅明文凭据泄露到局域网），v2rayN 订阅 `http://127.0.0.1:22222/v2rayN_sub.txt`。VBS 用自身所在目录推导根目录，禁止写死绝对路径。
 
@@ -33,7 +33,7 @@
 ## 工程约定
 - **禁止硬编码私密数据**：VMess UUID、伪装域名、CIDR 源地址、HTTP 端口一律读环境变量（`CFST_VMESS_UUID` / `CFST_VMESS_HOST` / `CFST_CIDR_URL` / `CFST_HTTP_PORT`）。本地私密值放根目录 `.env`（已被 `.gitignore` 排除），`.env.example` 为入库模板；Main.ps1 启动时自动把 `.env` 注入进程环境变量，子脚本读 `$env:` 默认值。缺关键变量时 `[FAIL] exit 1`，禁止静默回退到假值。
 - 参数约定：数量类参数（`$TargetCount` / `$TopN`，默认 30）放在各脚本 `param()` 块**第一位**，并在 Main.ps1 顶部以 `$Count` 统一下发。
-- 子脚本成功路径显式 `exit 0`、失败路径 `exit 1`，Main 依据 `$LASTEXITCODE` 串行中止。
+- 子脚本成功路径显式 `exit 0`、失败路径 `exit 1`；Main 对 Fetch/Ping 失败做缓存降级（见上），Gen-Sub 失败直接中止。
 - `cfst.exe` 为第三方二进制，不入库（`.gitignore` 已排除），README 中说明从 XIU2/CloudflareSpeedTest releases 下载。
 - **凭据不落地**：节点 UUID、Reality pbk、`CFST_RAW_LINKS` 链接、服务器 IP 等只存 `.env` 与 `data\`（均 gitignore）；日志/控制台/文档只允许出现打码形式；HTTP 服务必须 `--bind 127.0.0.1`。
 - **源站双配置架构**：主力 = sing-box `10) VMess-WS-TLS`（与 Gen-Sub 生成的 `ws/443/tls/SNI=Host=CFST_VMESS_HOST/path=CFST_VMESS_PATH(默认/)` 逐一对齐，域名必须 CF 橙云）；保底 = `18) VLESS-REALITY`（直连协议，完全不碰 CF，链接填入 `CFST_RAW_LINKS`）。脚本提示"关闭 CF 代理"仅发生在 Let's Encrypt 签证书瞬间，签完必须切回橙云 + SSL 模式 Full(strict)，续期走 HTTP-01 可穿透橙云；嫌续期麻烦可用 CF Origin Certificate（15 年，免切云）。**端口铁律**：CF 免费计划只回源固定端口（443/8443/2096/2083 等），脚本警告 80/443 被占并改用非标准端口（如 1732）时必须中止。占用者是脚本自己的 Reality → 挪端口重试；占用者是用户自有建站服务（本机实况：1Panel/OpenResty 占 443 不可动）→ 用 `sing-box no-auto-tls` 添加 VMess-WS-TLS：sing-box 只听内部端口（无 TLS），由 OpenResty 建反代网站把该域名的 path 流量 `proxy_pass` 到 127.0.0.1:内部端口（必须带 Upgrade/Connection 头），TLS 由 CF+OpenResty 两端负责；内部端口/路径用 `sing-box info tls` 查。排障：CF 返回 502=源站应答非 VMess（反代没指对/path 不匹配/SSL 模式错）；521/522/523=源站未监听或 A 记录指错 IP；525/526=证书与 SSL 模式不匹配。详见 README「源站部署」。
