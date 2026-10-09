@@ -78,7 +78,8 @@ powershell -ExecutionPolicy Bypass -File .\Main.ps1
 ### 4.（可选）定时自动重新测速
 
 ```powershell
-schtasks /Create /SC DAILY /ST 08:00 /TN "CFST-Update" ^
+# 每 6 小时重测一次：任务在笔记本上跑，人到哪、就以哪的网络出测速基准自动换血
+schtasks /Create /SC HOURLY /MO 6 /TN "CFST-Update" ^
   /TR "powershell -ExecutionPolicy Bypass -File \"<项目根目录>\Main.ps1\"" /F
 ```
 
@@ -116,23 +117,27 @@ sing-box 完全不碰 443，TLS 与转发交给已有建站层，链路为：
 v2rayN → CF边缘(橙云:443) → OpenResty(443, TLS终结) → 127.0.0.1:<内部端口> → sing-box(VMess-WS, 无TLS)
 ```
 
-1. VPS 执行 `sing-box no-auto-tls` → 协议选 **VMess-WS-TLS**，path 填 `/`（或自定义，见第 4 步），端口让脚本自动分配
-2. 记下结尾 `no-auto-tls INFO` 里的**端口**与**路径**（忘了随时 `sing-box info tls` 查看）；UUID 也记下
-3. 1Panel 建站：为 `CFST_VMESS_HOST` 域名创建**反向代理网站** → 代理目标 `http://127.0.0.1:<内部端口>`，并确保 WebSocket 升级头存在（1Panel 反代设置里开启 WebSocket，或手工确认 location 内有）：
-   ```nginx
-   location / {
-       proxy_pass http://127.0.0.1:<内部端口>;
-       proxy_http_version 1.1;
-       proxy_set_header Upgrade $http_upgrade;
-       proxy_set_header Connection "upgrade";
-       proxy_set_header Host $host;
-       proxy_read_timeout 300s;
-       proxy_send_timeout 300s;
-   }
+1. VPS 执行 `sing-box no-auto-tls` → 协议选 **VMess-WS-TLS**
+   - ⚠️ `no-auto-tls` 是**命令行参数**，不是主菜单里的选项——从主菜单选 10 会走 Caddy 抢 443 并让你切灰云（那是另一条路）
+   - 此模式下脚本会**按 UUID 自动生成随机 path**（不问你要），端口也自动分配，都在结尾 INFO 里
+2. 记下 `no-auto-tls INFO` 里的**端口 / 路径 / UUID**（忘了随时 `sing-box info tls` 复查）；`ss -tlnp | grep <端口>` 确认监听地址
+3. **判定 1Panel OpenResty 容器的网络模式**（决定代理目标怎么填）：
+   ```bash
+   docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{println}}{{end}}' <openresty容器名>
    ```
-4. 若 path 用了非 `/` 的值：本地 `.env` 同步设 `CFST_VMESS_PATH=/你的路径`，且 OpenResty 的 location 必须用同一路径
-5. 给该网站签发 Let's Encrypt 证书（推荐 CF DNS-01 验证，橙云下 HTTP-01 亦可穿透），CF SSL/TLS 模式 = **Full (strict)**，A 记录保持**橙云**
-6. 本地 `.env` 填入服务器 UUID → 跑 `Main.ps1`
+   - 输出 `host` → 容器共享宿主机网络栈，目标直接填 `http://127.0.0.1:<端口>`（**三个数字别少**，`127.0.0.0` 这种笔误 = 502，实测踩过）
+   - 输出 bridge 网络名 → 容器的 `127.0.0.1` 不是宿主机，需把 sing-box 的 `listen` 改为 `0.0.0.0` 后用 docker 网关 IP 作目标
+4. 1Panel 创建**反向代理网站**：主域名 = `CFST_VMESS_HOST`，目标 `http://127.0.0.1:<端口>`，HTTP 版本 1.1，**开启 WebSocket**。配置落盘位置（宿主机路径，容器为挂载）：vhost 在 `/opt/1panel/www/conf.d/<域名>.conf`（主 conf 只有 `include`，**proxy_pass 实际在** `/opt/1panel/www/sites/<域名>/proxy/*.conf`），日志在 `.../log/error.log`。手工核对 location 应有：
+   ```nginx
+   proxy_http_version 1.1;
+   proxy_set_header Upgrade $http_upgrade;
+   proxy_set_header Connection "upgrade";
+   proxy_set_header Host $host;
+   proxy_read_timeout 300s;
+   ```
+5. path 若非 `/`：本地 `.env` 设 `CFST_VMESS_PATH=<INFO里的原值>`（逐字复制，别手敲），OpenResty 的 location 用同一路径
+6. 给该网站签发 Let's Encrypt 证书（推荐 **DNS 验证 / CF API**，橙云全程不动），CF SSL/TLS 模式 = **Full (strict)**，A 记录保持**橙云**
+7. 本地 `.env` 填入服务器 UUID → 跑 `Main.ps1`
 
 此模式下订阅内容不变（wss/443/sni=域名）——TLS 由 CF 与 OpenResty 两端负责，sing-box 不碰证书。
 
@@ -146,6 +151,28 @@ v2rayN → CF边缘(橙云:443) → OpenResty(443, TLS终结) → 127.0.0.1:<内
 1. 两份配置的"权威值"回填 `.env`：配置一的 UUID → `CFST_VMESS_UUID`（留空时 `Main.ps1` 会在第 3 步 `[FAIL]` 中止，防止静默产出死订阅）；配置二的链接 → `CFST_RAW_LINKS`
 2. 跑 `Main.ps1`，v2rayN 更新订阅后验证：预期 30 个走 CF 的 vmess 优选 + 保底 reality 若干
 3. 若优选节点全灭而 reality 正常：查源站链路三要素——域名是否橙云、证书是否过期、path 是否 `/`。reality 不受 CFST 测速和源站域名影响，作为兜底存在，这正是双配置的意义
+
+## 订阅保鲜与故障隔离
+
+**CF 边缘 IP 是易耗品**：任意播 IP 会被中间网络轮动黑洞/封锁，而订阅是 cfst 测速那一刻的快照。典型症状——同一域名、同一 path、同一 UUID 的节点里，**有的通有的不通**：这几乎总是个别 IP 到期，不是网络封了 CF 段，更不是源站坏了。
+
+### 保鲜策略
+
+- 换网络（家 ↔ 校园 ↔ 热点）后重跑一次 `Main.ps1`（约 40 秒），不同出口的最优 IP 集不同
+- 或挂上面的 6 小时计划任务，让订阅始终跟随当前网络换血
+- v2rayN 端配合"真连接延迟"批量测试 + 按延迟排序，秒级挑活节点
+
+### 三级隔离诊断（节点半死/全死时按序排查）
+
+| 级别 | 动作 | 判读 |
+|---|---|---|
+| ① IP 层 | `Test-NetConnection <不通节点IP> -Port 443`，再对照一个通的节点 | 不通=TCP 超时 且 同订阅有节点通 → 单 IP 阵亡，重跑 `Main.ps1` 即愈 |
+| ② 链路层 | `curl.exe -sk -D - -o NUL -m 10 --resolve <域名>:443:<通的CF IP> -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" https://<域名><path>` | `101 Switching Protocols`=全链路健康；`502` 且 `Server: openresty`=源站段坏（CF 返回的 502 是 HTML，源站透传的 502 常为 text）；`52x`=回源断/证书不匹配 |
+| ③ 源站层 | VPS 上 `tail -n 20 <站点error.log>` | `connect() failed (111) upstream:"http://..."`=反代目标地址/端口笔误；`SSL_do_handshake failed ... upstream https`=目标填成了 https；无日志=server_name 没命中该站点 |
+
+### 升级触发条件
+
+只有当 cfst 在某网络下**存活率崩盘**（220 个候选活不到 5 个）才说明该网络真在封 CF 段，按序考虑：非 443 的 CF 支持端口（8443/2053/2087/2096，需同步改 Gen-Sub 端口与 cfst `-tp`）→ CF IPv6 段（`CFST_CIDR_URL` 换 v6 源）→ 纯靠 Reality 保底直连。
 
 ## 排查提示
 
