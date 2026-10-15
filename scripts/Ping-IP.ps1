@@ -3,6 +3,8 @@
   [string]$IpFile = "data\ip.txt",
   [string]$OutCsv = "data\result.csv",
   [string]$OutRawIp = "data\surviving_ips.txt",
+  [string]$ToxicPrefixes = $env:CFST_TOXIC_PREFIXES,
+  [switch]$SkipClean,
   [switch]$AllowTransparentProxy
 )
 
@@ -13,6 +15,14 @@ $exePath = Join-Path -Path $ProjectRoot -ChildPath "cfst.exe"
 $ipFilePath = Join-Path -Path $ProjectRoot -ChildPath $IpFile
 $csvPath = Join-Path -Path $ProjectRoot -ChildPath $OutCsv
 $rawIpPath = Join-Path -Path $ProjectRoot -ChildPath $OutRawIp
+$pingFile = Join-Path -Path $ProjectRoot -ChildPath "data\ip.ping.txt"
+
+# 毒瘤网段黑名单：逗号分隔的 IP 前缀数组（CFST_TOXIC_PREFIXES），按 StartsWith("前缀.") 匹配。
+# 过滤放在 Ping 阶段而非 Fetch 阶段：修改 .env 即时对既有缓存生效，不依赖拉取源可用性。
+function Test-Toxic([string]$line, [string[]]$prefixes) {
+  foreach ($p in $prefixes) { if ($line.StartsWith($p + '.')) { return $true } }
+  return $false
+}
 
 if (!(Test-Path $exePath)) { Write-Host "[FAIL] 找不到 cfst.exe: $exePath"; exit 1 }
 if (!(Test-Path $ipFilePath)) { Write-Host "[FAIL] 找不到 IP 源文件: $ipFilePath"; exit 1 }
@@ -48,13 +58,38 @@ if ($ie.ProxyEnable -eq 1) {
 }
 # ------------------------------------------
 
+# ---------------- 黑名单过滤 ----------------
+$ipLines = @(Get-Content $ipFilePath | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ([string]::IsNullOrWhiteSpace($ToxicPrefixes)) {
+  $toxicArr = @('162.159', '162.158', '108.162', '172.66')
+} else {
+  $toxicArr = @($ToxicPrefixes -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+$toxicCount = @($ipLines | Where-Object { Test-Toxic $_ $toxicArr }).Count
+
+if ($SkipClean.IsPresent -or ($env:CFST_SKIP_CLEAN -eq '1')) {
+  $testLines = $ipLines
+  Write-Host "[WARN] 已跳过毒瘤网段过滤 (CFST_SKIP_CLEAN/-SkipClean)，放行 $toxicCount 条已知问题段，测速结果请自行把关"
+}
+else {
+  $testLines = @($ipLines | Where-Object { -not (Test-Toxic $_ $toxicArr) })
+  Write-Host "[INFO] 黑名单过滤: 前缀 [$($toxicArr -join ' | ')]，剔除 $toxicCount 条，余 $($testLines.Count) 条进入测速"
+}
+if (@($testLines).Count -eq 0) {
+  Write-Host "[FAIL] 过滤后无可测 IP，请检查 CFST_TOXIC_PREFIXES 是否过宽"
+  exit 1
+}
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($pingFile, ($testLines -join "`n"), $utf8NoBom)
+# --------------------------------------------
+
 # 注意：故意不预删 surviving_ips.txt——测速失败时 Main.ps1 需要降级沿用旧存活列表；
 # 成功路径由 WriteAllLines 整体覆盖，不存在脏数据残留
 if (Test-Path $csvPath) { Remove-Item $csvPath -Force }
 
 # 通过管道向 stdin 喂入空行，自动满足 cfst.exe 结尾的“按下回车键退出”，无需人工干预
 # & 调用为同步串行：本行结束后才会继续往下执行
-'' | & $exePath -f $ipFilePath -tp 443 -dd -tl 300 -dn $TargetCount -o $csvPath
+'' | & $exePath -f $pingFile -tp 443 -dd -tl 300 -dn $TargetCount -o $csvPath
 
 if (!(Test-Path $csvPath)) {
   Write-Host "[FAIL] 测速执行失败，未生成 $OutCsv (cfst 退出码: $LASTEXITCODE)"
@@ -68,7 +103,6 @@ if ($csvData) {
   # 按延迟升序排序，仅保留前 $TargetCount 个优选 IP 写入存活列表
   $topNodes = $csvData | Sort-Object { [double]$_.Ping } | Select-Object -First $TargetCount
 
-  $utf8NoBom = New-Object System.Text.UTF8Encoding $false
   [System.IO.File]::WriteAllLines($rawIpPath, @($topNodes | ForEach-Object { $_.IP }), $utf8NoBom)
 
   Write-Host "[OK] [$currentTime] 测速完成，按延迟排序后保留前 $($topNodes.Count) 个优选节点 (上限 $TargetCount)："

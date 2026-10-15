@@ -1,8 +1,7 @@
 ﻿param (
   [string]$BaseUrl = $env:CFST_CIDR_URL,
   [string]$OutFile = "data\ip.txt",
-  [int]$RetainN = 100,
-  [switch]$SkipClean
+  [int]$RetainN = 100
 )
 
 # 本脚本位于 scripts\ 子目录，项目根目录为其父级
@@ -27,23 +26,12 @@ try {
   # 剥离隐藏回车符与 BOM 残留字符
   $lines = $response.Content -split "`n" | ForEach-Object { $_.Trim([char]0xFEFF, [char]0xFFFE, [char]9, [char]10, [char]13, [char]32) } | Where-Object { ![string]::IsNullOrWhiteSpace($_) }
 
-  # 毒瘤网段清洗（可用 -SkipClean 或 CFST_SKIP_CLEAN=1 跳过；注意 cfst 的 TCP Ping
-  # 无法识别"WARP 段端口开放但跑不了你的业务"，跳过清洗可能把快速死 IP 顶进 TopN）
-  $skip = $SkipClean.IsPresent -or ($env:CFST_SKIP_CLEAN -eq '1')
-  $toxicPattern = '^(162\.159\.|162\.158\.|108\.162\.|172\.66\.)'
-  if ($skip) {
-    $toxicCount = @($lines | Where-Object { $_ -match $toxicPattern }).Count
-    Write-Host "[WARN] 已跳过毒瘤网段清洗 (CFST_SKIP_CLEAN/-SkipClean)，本次放行 $toxicCount 条已知问题段，测速结果请自行把关"
-    $cleanLines = $lines
-  }
-  else {
-    $cleanLines = $lines | Where-Object { $_ -notmatch $toxicPattern }
-  }
-  $finalLines = $cleanLines | Select-Object -First $RetainN
+  # 本脚本只负责存原始列表；毒瘤网段过滤统一在 Ping-IP 阶段执行（改黑名单即时生效，无需重新拉取）
+  $finalLines = $lines | Select-Object -First $RetainN
 
-  # 防呆：清洗后为空则不覆盖旧缓存（源站换格式/网络返回空页时保护降级数据）
+  # 防呆：结果为空则不覆盖旧缓存（源站换格式/网络返回空页时保护降级数据）
   if (@($finalLines).Count -eq 0) {
-    Write-Host "[FAIL] 清洗后无任何 CIDR 条目，保留旧 ip.txt 不覆盖"
+    Write-Host "[FAIL] 源站返回空列表，保留旧 ip.txt 不覆盖"
     exit 1
   }
 
@@ -52,11 +40,10 @@ try {
   $utf8NoBom = New-Object System.Text.UTF8Encoding $false
   [System.IO.File]::WriteAllText($OutPath, ($finalLines -join "`n"), $utf8NoBom)
 
-  $mode = if ($skip) { "未清洗" } else { "已清洗毒瘤网段" }
-  Write-Host "[OK] IP 源库拉取成功 ($mode)，保留 $($finalLines.Count) 条数据至: $OutPath"
+  Write-Host "[OK] IP 源库拉取成功，保留 $($finalLines.Count) 条原始数据至: $OutPath (毒瘤网段由 Ping 阶段过滤)"
   exit 0
 }
 catch {
-  Write-Host "[FAIL] 下载或清洗失败: $($_.Exception.Message)"
+  Write-Host "[FAIL] 下载失败: $($_.Exception.Message)"
   exit 1
 }

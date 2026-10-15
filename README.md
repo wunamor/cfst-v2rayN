@@ -3,7 +3,7 @@
 完全本地化、免干预的 Cloudflare 优选 IP 自动化流程，为 v2rayN 提供持续更新的本地订阅。
 
 ```
-拉取远程 CIDR → 剔除不可用网段 → TCP Ping 测速 → 组装明文 vmess 订阅 → 本地 HTTP 服务供 v2rayN 定时拉取
+拉取远程 CIDR → 黑名单过滤 + TCP Ping 测速 → 组装明文 vmess 订阅 → 本地 HTTP 服务供 v2rayN 定时拉取
 ```
 
 ## 目录结构
@@ -16,8 +16,8 @@ CFST/
 ├── .env                # 私密配置（不入库，见下方"配置"）
 ├── .env.example        # 配置模板
 ├── scripts/
-│   ├── Fetch-IP.ps1    # 拉取 + 清洗 CIDR 网段 → data\ip.txt
-│   ├── Ping-IP.ps1     # TCP Ping 测速，按延迟取 Top N → data\surviving_ips.txt
+│   ├── Fetch-IP.ps1    # 拉取 CIDR 原始列表 → data\ip.txt
+│   ├── Ping-IP.ps1     # 黑名单过滤 + TCP Ping 测速，按延迟取 Top N → data\surviving_ips.txt
 │   └── Gen-Sub.ps1     # 生成明文 vmess 订阅 → data\v2rayN_sub.txt
 ├── data/               # 运行产物（不入库）
 └── temp/               # 临时文件（不入库）
@@ -46,7 +46,8 @@ Copy-Item .env.example .env
 | `CFST_CIDR_URL` | CIDR 网段源地址 | `https://.../CF-CIDR.txt` |
 | `CFST_HTTP_PORT` | 本地订阅服务端口（默认 22222） | `22222` |
 | `CFST_VMESS_PATH` | VMess WebSocket 路径，须与源站一致（默认 `/`） | `/rs233` |
-| `CFST_SKIP_CLEAN` | `1` 跳过毒瘤网段清洗（试水用；TCP Ping 无法识别 WARP 死段，慎用） | `0` |
+| `CFST_TOXIC_PREFIXES` | 毒瘤网段黑名单：逗号分隔 IP 前缀数组，**Ping 阶段**过滤（改完即时对缓存生效，无需重新拉取） | `162.159,162.158,108.162,172.66` |
+| `CFST_SKIP_CLEAN` | `1` 跳过毒瘤网段过滤（试水用；TCP Ping 无法识别 WARP 死段，慎用） | `0` |
 | `CFST_RAW_LINKS` | 手动维护的节点原始链接（`vmess://`、`vless://` 等，`;` 分隔多条），原样合入订阅；协议头校验，内容透传 | `vless://...` |
 
 ### 安全注意
